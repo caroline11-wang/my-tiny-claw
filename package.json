@@ -1,0 +1,28 @@
+{
+  "name": "my-tiny-claw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript Agent Harness using OpenAI and Anthropic SDK providers",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file=.env --import tsx cmd/claw/main.ts",
+    "start:ollama": "node --env-file=.env-ollama --import tsx cmd/claw/main.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start:built": "node --env-file=.env dist/cmd/claw/main.js",
+    "start:ollama:built": "node --env-file=.env-ollama dist/cmd/claw/main.js",
+    "test": "node --import tsx --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
+    "openai": "^7.34.0"
+  }
+}

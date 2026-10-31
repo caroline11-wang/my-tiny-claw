@@ -1,0 +1,6 @@
+{
+  "name": "agent-http-demo",
+  "version": "1.0.0",
+  "description": "服务化 Agent hello world：AgentEngine + HTTP 入口",
+  "scripts": { "start": "node server.cjs" }
+}

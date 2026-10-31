@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.DS_Store
+.backup/
+.tools/
+.env
+.env-ollama
+.env-*
+.env.*
+!.env.example
+hackathon2025-apiKey-7780898.csv
+hackathon2025-apiKey-7780898.md
+deploy/pkg/
+deploy/*.zip
+helloworld.js
+helloworld.ts
+test.md
