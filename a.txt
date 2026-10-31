@@ -1,1 +1,10 @@
-这是文件 A，记录前端的报错日志：用户打开登录页面时，浏览器提示网络请求失败。
+For all its impressive size, however, the compute market lacks sophistication. The
+“hyperscalers” (a still somewhat arcane piece of IT jargon for a handful of giant
+cloud-computing providers including Amazon, Google and Microsoft) and frontier AI labs
+(such as Anthropic and OpenAI) make deals for tens or even hundreds of billions of dollars of
+compute. But such arrangements are unavailable to thousands of smaller firms. Buyers and
+sellers also have few of the derivatives that in established markets allow them to hedge their
+exposures and speculate.
+整段话的中文翻译
+
+然而，尽管算力市场的规模令人印象深刻，但它缺乏成熟度。所谓的“超大规模企业”（hyperscalers，这是IT界一个仍有些晦涩的行话，指代少数几家大型云计算提供商，包括亚马逊、谷歌和微软）以及前沿AI实验室（如Anthropic和OpenAI），动辄达成数百亿甚至上千亿美元的算力交易。但成千上万家较小的公司却无法获得这种级别的合作。此外，买家和卖家也几乎没有衍生品可用——而在成熟市场中，衍生品能让他们对冲风险敞口并进行投机

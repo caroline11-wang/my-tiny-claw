@@ -17,7 +17,6 @@
 
 import http from "node:http";
 import { existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AgentEngine } from "../../internal/engine/loop.js";
@@ -34,7 +33,9 @@ import { WriteFileTool } from "../../internal/tools/write_file.js";
 
 // ---------- Provider 工厂（与 cmd/claw/main.ts 相同的装配逻辑，服务化入口独立持有） ----------
 function createProvider(providerName: string): LLMProvider {
-  if (providerName === "mock") {
+  // 大小写不敏感：控制台环境变量曾出现 MOCK 大写导致 500，统一归一化
+  const normalized = providerName.trim().toLowerCase();
+  if (normalized === "mock") {
     return new MockServerProvider();
   }
   const apiKey = process.env.LLM_API_KEY?.trim() || "";
@@ -42,11 +43,11 @@ function createProvider(providerName: string): LLMProvider {
   const baseURL = process.env.LLM_BASE_URL?.trim() || "";
   const protocol = process.env.LLM_API_PROTOCOL ?? "openai-compatible";
 
-  if (providerName === "local-ollama") {
+  if (normalized === "local-ollama") {
     return new OllamaProvider({ model, baseURL, apiKey: apiKey || "ollama" });
   }
-  if (providerName !== "bailian") {
-    throw new Error(`Unsupported LLM_PROVIDER "${providerName}"`);
+  if (normalized !== "bailian") {
+    throw new Error(`Unsupported LLM_PROVIDER "${providerName}" (supported: mock / bailian / local-ollama)`);
   }
   if (!apiKey || !model || !baseURL) {
     throw new Error("bailian provider requires LLM_API_KEY / LLM_MODEL / LLM_BASE_URL");
@@ -94,8 +95,9 @@ function createEngine(): AgentEngine {
   const providerName = process.env.LLM_PROVIDER?.trim() || "mock";
   const provider = createProvider(providerName);
 
-  // 工具工作区：AgentRun 实例内可写目录。默认用临时目录，可用 AGENT_WORK_DIR 覆盖。
-  const workDir = process.env.AGENT_WORK_DIR?.trim() || join(tmpdir(), "tiny-claw-workspace");
+  // 工作区默认取进程目录（AgentRun 上即 zip 解压后的 /code，部署包内可直接携带工作文件）。
+  // 可用 AGENT_WORK_DIR 覆盖。
+  const workDir = process.env.AGENT_WORK_DIR?.trim() || process.cwd();
   if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
 
   const registry = new ToolRegistry();
@@ -111,6 +113,7 @@ function createEngine(): AgentEngine {
 // ---------- OpenAI Chat Completions 兼容层 ----------
 interface ChatCompletionRequestBody {
   messages?: Array<{ role: string; content?: string }>;
+  stream?: boolean;
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -127,15 +130,24 @@ function jsonResponse(res: http.ServerResponse, status: number, payload: unknown
 const PORT = Number(process.env.AGENT_PORT || process.env.PORT || 9000);
 
 const server = http.createServer(async (req, res) => {
+  // 记录所有进入的请求（排错用：定位平台实际调用的方法与路径）
+  console.log(`[Server] <-- ${req.method} ${req.url}`);
+
   // 健康检查：对应控制台"健康检查"配置路径
   if (req.method === "GET" && (req.url === "/health" || req.url === "/healthz")) {
     return jsonResponse(res, 200, { status: "ok" });
   }
 
-  // Agent 调试接口：AgentRun"代码与调试 → 调试工具"会按 OpenAI 协议 POST 到这里
-  if (req.method === "POST" && req.url === "/v1/chat/completions") {
+  // Agent 调试接口：AgentRun"代码与调试 → 调试"面板实测 POST 到根路径 "/"；
+  // 同时兼容 OpenAI 风格路径变体（带/不带 /v1 前缀、尾部斜杠），供 curl/SDK 直接调用。
+  const isChatPath =
+    req.url === "/" || /^\/(v1\/)?chat\/completions\/?$/.test(req.url ?? "");
+  if (req.method === "POST" && isChatPath) {
     try {
-      const body: ChatCompletionRequestBody = JSON.parse(await readBody(req) || "{}");
+      const rawBody = await readBody(req);
+      // 记录请求体（截断），用于定位平台实际发送的协议字段
+      console.log(`[Server] <-- 请求体(前500字符): ${rawBody.slice(0, 500)}`);
+      const body: ChatCompletionRequestBody = JSON.parse(rawBody || "{}");
       const messages = body.messages ?? [];
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
       const userPrompt = lastUser?.content?.trim();
@@ -147,11 +159,39 @@ const server = http.createServer(async (req, res) => {
       const engine = createEngine();
       const reply = await engine.run(new AbortController().signal, userPrompt);
 
+      const responseId = `chatcmpl-${Date.now()}`;
+      const created = Math.floor(Date.now() / 1000);
+      const modelName = process.env.LLM_MODEL || "my-tiny-claw";
+
+      // 流式（SSE）响应：平台调试面板可能以 stream:true 请求，OpenAI 分块协议返回
+      if (body.stream === true) {
+        console.log(`[Server] --> 以 SSE 流式响应返回 (${reply.length} 字符)`);
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+        const chunk = (delta: Record<string, unknown>, finishReason: string | null): string =>
+          `data: ${JSON.stringify({
+            id: responseId,
+            object: "chat.completion.chunk",
+            created,
+            model: modelName,
+            choices: [{ index: 0, delta, finish_reason: finishReason }],
+          })}\n\n`;
+        res.write(chunk({ role: "assistant", content: reply }, null));
+        res.write(chunk({}, "stop"));
+        res.write("data: [DONE]\n\n");
+        res.end();
+        return;
+      }
+
+      console.log(`[Server] --> 以 JSON 响应返回 (${reply.length} 字符)`);
       return jsonResponse(res, 200, {
-        id: `chatcmpl-${Date.now()}`,
+        id: responseId,
         object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: process.env.LLM_MODEL || "my-tiny-claw",
+        created,
+        model: modelName,
         choices: [
           {
             index: 0,
@@ -167,8 +207,9 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  console.warn(`[Server] 404 未匹配路由: ${req.method} ${req.url}`);
   res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("Not Found");
+  res.end(`Not Found: ${req.method} ${req.url}`);
 });
 
 // AgentRun 硬性要求：监听 0.0.0.0，端口读 AGENT_PORT

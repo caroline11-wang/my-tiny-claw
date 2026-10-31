@@ -3,6 +3,7 @@ dist/
 .DS_Store
 .backup/
 .tools/
+.trash/
 .env
 .env-ollama
 .env-*
