@@ -108,9 +108,34 @@ curl -X POST https://<你的Endpoint>/v1/chat/completions \
 
 ---
 
+## 第 10 讲：工作区规范与技能
+
+HTTP 入口与 CLI 共用 `AgentEngine`，每次聊天请求开始时会从工作区重新组装系统提示词：
+核心规则 → `AGENTS.md` → `.claw/skills/**/SKILL.md`。
+HTTP 默认工作区为进程当前目录（AgentRun 通常为 `/code`），可通过 `AGENT_WORK_DIR` 覆盖。
+
+更新代码后先运行 `npm run build`，用新的 `dist/` 替换打包目录中的编译产物。
+如果需要项目规范和技能，还需将 `AGENTS.md` 和 `.claw/skills/` 一并放入打包目录的
+工作区根目录，再重新压缩并部署。不要把本机 `.env` 或 API Key 资料复制进部署包。
+已有 zip 不会因修改 TypeScript 源码而自动更新。
+
+不提供这些文件时仍可使用核心规则运行；配置了格式不正确的技能或无法读取的指南时，
+请求会显式失败，HTTP 返回 500，日志中保留错误来源。技能格式及离线测试方法见
+[README 第 10 讲](../README.md#第-10-讲skill-加载与-prompt-composer)。
+Mock 模型不会依据技能语义改变决策，验证规范遵循效果需要真实模型。
+
+## 第 11 讲：Session 驱动引擎
+
+引擎现在通过 `run(signal, session)` 读取会话工作区，每个工具轮次使用最近 6 条历史消息，
+并保存 Thinking、Action 与工具观察结果。HTTP 入口通过 `X-AgentRun-Session-ID`
+请求头复用进程内 Session；请求头缺失或为空时创建独立会话，JSON/SSE 响应协议不变。
+日志输出会话 ID 及来源。历史在进程重启后丢失，多实例部署需确保同一 ID 的请求
+路由到同一实例；同一会话的请求应顺序发送。
+工具 Registry 和 Session 使用同一工作区；更新部署仍须重新编译打包。
+
 ## 五、下一步可玩的方向
 
-- **会话记忆**：当前每个请求独立无记忆；可按 sessionId 存历史（参考 `agent-http-demo/server.cjs` 里的 sessions Map）
+- **会话记忆**：已有按 Session ID 复用的进程内历史；可进一步实现持久化、过期清理与同会话请求排队
 - **Agent Sandbox**：把 bash 工具的执行迁到 AgentRun 沙箱，实现隔离执行（进阶）
 - **版本与灰度**：左侧「版本与灰度」发布版本、配流量比例，体验 Serverless 发布流程
 - **可观测**：接入 SLS 日志 / ARMS 链路追踪，看 Token 消耗

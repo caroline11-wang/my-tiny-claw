@@ -1,20 +1,42 @@
 import assert from "node:assert/strict";
 import { statSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { PromptComposer } from "../internal/context/composer.ts";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
+
+test("the chapter 10 workspace composes TypeScript interface rules and the Git workflow", async () => {
+  const message = await new PromptComposer(join(projectRoot, "workspace")).build();
+  assert.equal(message.role, "system");
+  assert.match(message.content, /TypeScript/u);
+  assert.match(message.content, /code.*message/u);
+  assert.match(message.content, /中文/u);
+  assert.match(message.content, /技能名称: git-workflow/u);
+  assert.match(message.content, /Emoji/u);
+});
+
+async function prepareWorkspace(directory) {
+  const workDir = join(directory, "workspace");
+  await mkdir(workDir);
+  execFileSync("git", ["init", "-b", "main"], {
+    cwd: workDir,
+    stdio: "pipe",
+  });
+  return workDir;
+}
 
 test("the mock provider requests three real file reads in one turn with thinking enabled", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tiny-claw-entry-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
+  const workDir = await prepareWorkspace(directory);
   const contents = ["前端报错日志", "后端接口响应时间", "日期信息"];
   for (const [index, path] of ["a.txt", "b.txt", "c.txt"].entries()) {
-    await writeFile(join(directory, path), contents[index]);
+    await writeFile(join(workDir, path), contents[index]);
   }
   const result = spawnSync(
     process.execPath,
@@ -30,11 +52,12 @@ test("the mock provider requests three real file reads in one turn with thinking
   assert.ifError(result.error);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stderr.includes(`锁定工作区: ${await realpath(workDir)}`));
   assert.match(result.stderr, /\[LLM\] 当前连接: provider=mock, model=mock/u);
   assert.match(result.stdout, /🚀 欢迎来到 go-tiny-claw 引擎启动序列/);
   for (const [index, path] of ["a.txt", "b.txt", "c.txt"].entries()) {
     assert.ok(result.stdout.includes(`${path}：${contents[index]}`));
-    assert.equal(await readFile(join(directory, path), "utf8"), contents[index]);
+    assert.equal(await readFile(join(workDir, path), "utf8"), contents[index]);
     assert.ok(result.stderr.includes(`执行工具: read_file, 参数: {"path":"${path}"}`));
   }
   assert.match(result.stderr, /慢思考模式 \(Thinking Phase\): true/u);
@@ -53,7 +76,8 @@ test("the mock provider requests three real file reads in one turn with thinking
 test("missing files remain visible while successful file observations are preserved", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tiny-claw-entry-error-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  await writeFile(join(directory, "b.txt"), "available content");
+  const workDir = await prepareWorkspace(directory);
+  await writeFile(join(workDir, "b.txt"), "available content");
   const result = spawnSync(
     process.execPath,
     ["--import", import.meta.resolve("tsx"), join(projectRoot, "cmd/claw/main.ts")],
@@ -71,6 +95,30 @@ test("missing files remain visible while successful file observations are preser
   assert.match(result.stdout, /c\.txt：Error executing read_file:/u);
   assert.match(result.stderr, /模型请求并发调用 3 个工具/u);
   assert.match(result.stderr, /任务宣告完成/u);
+});
+
+test("the CLI rejects an unprepared workspace and refuses the parent repository", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tiny-claw-entry-guard-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const run = () => spawnSync(process.execPath, [
+    "--import", import.meta.resolve("tsx"), join(projectRoot, "cmd/claw/main.ts"),
+  ], {
+    cwd: directory,
+    encoding: "utf8",
+    env: { ...process.env, LLM_PROVIDER: "mock" },
+    timeout: 10_000,
+  });
+  const missing = run();
+  assert.ifError(missing.error);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /准备 workspace 并初始化独立 Git 仓库/u);
+  await mkdir(join(directory, "workspace"));
+  execFileSync("git", ["init", "-b", "main"], { cwd: directory, stdio: "pipe" });
+  const parent = run();
+  assert.ifError(parent.error);
+  assert.equal(parent.status, 1);
+  assert.match(parent.stderr, /不能使用父目录/u);
+  assert.doesNotMatch(parent.stderr, /唤醒会话/u);
 });
 
 test("the real provider requires API credentials from the environment", () => {

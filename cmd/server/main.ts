@@ -16,10 +16,12 @@
 // 本地试用：LLM_PROVIDER=mock node --import tsx cmd/server/main.ts
 
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { AgentEngine } from "../../internal/engine/loop.js";
+import { GlobalSessionMgr, type Session } from "../../internal/context/session.js";
 import { ClaudeProvider } from "../../internal/provider/claude.js";
 import type { LLMProvider } from "../../internal/provider/interface.js";
 import { OpenAIProvider } from "../../internal/provider/openai.js";
@@ -91,7 +93,10 @@ class MockServerProvider implements LLMProvider {
 }
 
 // ---------- 组装 Agent：Provider + Registry + Engine（依赖注入，与 CLI 完全一致） ----------
-function createEngine(): AgentEngine {
+// 会话按 sessionId 复用：同一会话的多次请求命中 GlobalSessionMgr 中的同一个 Session，历史得以延续。
+// AgentRun 平台会保证相同 X-AgentRun-Session-ID 的请求路由到同一实例（会话亲和），
+// 因此进程内存 Map 在多实例场景下也是安全的。
+function createEngine(sessionId: string): { engine: AgentEngine; session: Session } {
   const providerName = process.env.LLM_PROVIDER?.trim() || "mock";
   const provider = createProvider(providerName);
 
@@ -107,7 +112,10 @@ function createEngine(): AgentEngine {
   registry.register(new EditFileTool(workDir));
 
   const enableThinking = process.env.ENABLE_THINKING === "true";
-  return new AgentEngine(provider, registry, workDir, enableThinking);
+  return {
+    engine: new AgentEngine(provider, registry, enableThinking),
+    session: GlobalSessionMgr.getOrCreate(sessionId, workDir),
+  };
 }
 
 // ---------- OpenAI Chat Completions 兼容层 ----------
@@ -155,9 +163,15 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, 400, { error: { message: "缺少 user 消息" } });
       }
 
-      // 每个请求一个独立 Agent 实例与上下文（hello world 阶段不做会话记忆）
-      const engine = createEngine();
-      const reply = await engine.run(new AbortController().signal, userPrompt);
+      // 会话 ID：优先用平台传入的 X-AgentRun-Session-ID（调试面板的「会话 ID」即此值，
+      // 且平台按该值做会话亲和路由到同一实例）；header 缺失时兜底生成一次性会话。
+      const headerSessionId = req.headers["x-agentrun-session-id"]?.toString().trim();
+      const sessionId = headerSessionId || randomUUID();
+      console.log(`[Server] session=${sessionId} (${headerSessionId ? "来自平台 header" : "header 缺失，临时生成"})`);
+
+      const { engine, session } = createEngine(sessionId);
+      session.append({ role: "user", content: userPrompt });
+      const reply = await engine.run(new AbortController().signal, session);
 
       const responseId = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);

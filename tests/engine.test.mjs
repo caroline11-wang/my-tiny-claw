@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { AgentEngine } from "../internal/engine/loop.ts";
+import { Session } from "../internal/context/session.ts";
+
+function createSession(prompt, workDir = "/workspace") {
+  const session = new Session("test", workDir);
+  session.append({ role: "user", content: prompt });
+  return session;
+}
 
 test("tools start concurrently and observations retain call order despite reverse completion", { timeout: 5000 }, async () => {
   const signal = new AbortController().signal;
@@ -46,9 +56,10 @@ test("tools start concurrently and observations retain call order despite revers
         isError: call.id === "error",
       };
     },
-  }, "/workspace");
+  });
 
-  const running = engine.run(signal, "run independent tools");
+  const session = createSession("run independent tools");
+  const running = engine.run(signal, session);
   await allStarted;
   assert.deepEqual(started, ["slow", "fast", "error"]);
   for (const id of ["error", "fast"]) {
@@ -60,6 +71,11 @@ test("tools start concurrently and observations retain call order despite revers
   releases.get("slow")();
   await running;
   assert.equal(requests, 2);
+  assert.deepEqual(session.getWorkingMemory(0).slice(-4, -1), calls.map((call) => ({
+    role: "user",
+    toolCallId: call.id,
+    content: call.id === "error" ? "tool failed" : `result:${call.id}`,
+  })));
 });
 
 test("the main loop feeds tool observations back until the model finishes", async () => {
@@ -107,19 +123,16 @@ test("the main loop feeds tool observations back until the model finishes", asyn
       };
     },
   };
-  const engine = new AgentEngine(provider, registry, "/workspace");
+  const engine = new AgentEngine(provider, registry);
 
-  await engine.run(signal, "列出当前目录文件");
+  await engine.run(signal, createSession("列出当前目录文件"));
 
   assert.equal(requests.length, 2);
-  assert.deepEqual(requests[0].messages, [
-    {
-      role: "system",
-      content:
-        "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-    },
-    { role: "user", content: "列出当前目录文件" },
-  ]);
+  assert.equal(requests[0].messages.length, 2);
+  assert.equal(requests[0].messages[0].role, "system");
+  assert.match(requests[0].messages[0].content, /# 核心身份/u);
+  assert.deepEqual(requests[0].messages[1], { role: "user", content: "列出当前目录文件" });
+  assert.deepEqual(requests[1].messages[0], requests[0].messages[0]);
   assert.deepEqual(requests[0].availableTools, [toolDefinition]);
   assert.deepEqual(executions, [toolCall]);
   assert.deepEqual(requests[1].messages.slice(-2), [
@@ -153,11 +166,10 @@ test("the main loop wraps and propagates model generation failures", async () =>
         throw new Error("No tools should be executed");
       },
     },
-    "/workspace",
   );
 
   await assert.rejects(
-    engine.run(new AbortController().signal, "hello"),
+    engine.run(new AbortController().signal, createSession("hello")),
     (error) => {
       assert.equal(error.message, "Action 阶段生成失败");
       assert.equal(error.cause, cause);
@@ -199,11 +211,11 @@ test("thinking precedes every action with no tools and preserves the context tim
         return { toolCallId: call.id, output: "文件读取失败", isError: true };
       },
     },
-    "/workspace",
     true,
   );
 
-  await engine.run(signal, "检查目录");
+  const session = createSession("检查目录");
+  await engine.run(signal, session);
 
   assert.equal(engine.enableThinking, true);
   assert.equal(discoveries, 2);
@@ -217,6 +229,9 @@ test("thinking precedes every action with no tools and preserves the context tim
   ]);
   assert.deepEqual(requests[3].messages, [
     ...initial, responses[0], responses[1], observation, responses[2],
+  ]);
+  assert.deepEqual(session.getWorkingMemory(0), [
+    initial[1], responses[0], responses[1], observation, responses[2], responses[3],
   ]);
 });
 
@@ -234,14 +249,17 @@ test("an empty thinking response does not end the task or enter the history", as
       getAvailableTools() { return []; },
       async execute() { assert.fail("no tool should execute"); },
     },
-    "/workspace",
     true,
   );
 
-  await engine.run(new AbortController().signal, "hello");
+  const session = createSession("hello");
+  await engine.run(new AbortController().signal, session);
 
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1].messages, requests[0].messages);
+  assert.deepEqual(session.getWorkingMemory(0), [
+    { role: "user", content: "hello" }, { role: "assistant", content: "完成" },
+  ]);
 });
 
 for (const failingPhase of ["Thinking", "Action"]) {
@@ -260,15 +278,170 @@ for (const failingPhase of ["Thinking", "Action"]) {
         getAvailableTools() { return []; },
         async execute() { assert.fail("no tool should execute"); },
       },
-      "/workspace",
       true,
     );
 
-    await assert.rejects(engine.run(new AbortController().signal, "hello"), (error) => {
+    const session = createSession("hello");
+    await assert.rejects(engine.run(new AbortController().signal, session), (error) => {
       assert.equal(error.message, `${failingPhase} 阶段生成失败`);
       assert.equal(error.cause, cause);
       return true;
     });
     assert.equal(calls, failingPhase === "Thinking" ? 1 : 2);
+    assert.deepEqual(session.getWorkingMemory(0), [
+      { role: "user", content: "hello" },
+      ...(failingPhase === "Action" ? [{ role: "assistant", content: "准备行动" }] : []),
+    ]);
   });
 }
+
+test("composed prompts reach every phase and tool turn, and refresh only on the next run", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tiny-claw-engine-context-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const agentsPath = join(directory, "AGENTS.md");
+  const skillDirectory = join(directory, ".claw", "skills", "review");
+  await mkdir(skillDirectory, { recursive: true });
+  const skillPath = join(skillDirectory, "SKILL.md");
+  const skill = (version) =>
+    `---\nname: review\ndescription: Review changes\n---\nReview instructions ${version}`;
+  await writeFile(agentsPath, "Workspace guidelines v1");
+  await writeFile(skillPath, skill("v1"));
+
+  const requests = [];
+  const call = { id: "call_review", name: "example", arguments: {} };
+  const definition = { name: "example", description: "Example", inputSchema: {} };
+  const engine = new AgentEngine({
+    async generate(_signal, messages, tools) {
+      requests.push(structuredClone(messages));
+      assert.equal(messages.filter((message) => message.role === "system").length, 1);
+      if (tools.length === 0) return { role: "assistant", content: "准备行动" };
+      if (requests.length === 2) {
+        await writeFile(agentsPath, "Workspace guidelines v2");
+        await writeFile(skillPath, skill("v2"));
+        return { role: "assistant", content: "", toolCalls: [call] };
+      }
+      return { role: "assistant", content: "完成" };
+    },
+  }, {
+    getAvailableTools() { return [definition]; },
+    async execute() {
+      return { toolCallId: call.id, output: "tool observation", isError: false };
+    },
+  }, true);
+
+  assert.equal(await engine.run(new AbortController().signal, createSession("First run", directory)), "完成");
+  assert.equal(requests.length, 4);
+  for (const messages of requests) {
+    assert.deepEqual(messages[0], requests[0][0]);
+    assert.match(messages[0].content, /Workspace guidelines v1/u);
+    assert.match(messages[0].content, /Review instructions v1/u);
+    assert.doesNotMatch(messages[0].content, /v2/u);
+  }
+  assert.ok(requests[2].some((message) => message.toolCallId === call.id));
+
+  assert.equal(await engine.run(new AbortController().signal, createSession("Second run", directory)), "完成");
+  assert.equal(requests.length, 6);
+  for (const messages of requests.slice(4)) {
+    assert.match(messages[0].content, /Workspace guidelines v2/u);
+    assert.match(messages[0].content, /Review instructions v2/u);
+    assert.doesNotMatch(messages[0].content, /v1/u);
+  }
+  assert.equal(requests[4].length, 2, "a different session starts a fresh conversation");
+});
+
+test("prompt loading failures stop before any provider or tool operation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tiny-claw-engine-context-error-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const skillDirectory = join(directory, ".claw", "skills", "broken");
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(join(skillDirectory, "SKILL.md"), "Missing required frontmatter");
+  const engine = new AgentEngine({
+    async generate() { assert.fail("provider must not run with an invalid prompt"); },
+  }, {
+    getAvailableTools() { assert.fail("tool discovery must not run"); },
+    async execute() { assert.fail("tools must not run"); },
+  });
+
+  await assert.rejects(engine.run(new AbortController().signal, createSession("hello", directory)), (error) => {
+    assert.match(error.message, /加载技能失败/u);
+    assert.match(error.cause.message, /必须以 ---/u);
+    return true;
+  });
+});
+
+test("each tool turn rebuilds a six-message window without deleting the full session history", async () => {
+  const session = new Session("window", "/workspace");
+  const oldMessages = Array.from({ length: 10 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `old-${index}`,
+  }));
+  for (const message of oldMessages) session.append(message);
+  session.append({ role: "user", content: "current task" });
+  const calls = ["a", "b"].map((id) => ({
+    id, name: "example", arguments: {},
+  }));
+  const requests = [];
+  const engine = new AgentEngine({
+    async generate(_signal, messages) {
+      requests.push(structuredClone(messages));
+      assert.equal(messages.length, 7, "system plus six recent messages");
+      assert.deepEqual(messages.slice(1), session.getWorkingMemory(6));
+      return requests.length === 1
+        ? { role: "assistant", content: "", toolCalls: calls }
+        : { role: "assistant", content: "done" };
+    },
+  }, {
+    getAvailableTools() { return []; },
+    async execute(_signal, call) {
+      return { toolCallId: call.id, output: `result-${call.id}`, isError: false };
+    },
+  });
+
+  assert.equal(await engine.run(new AbortController().signal, session), "done");
+  assert.equal(requests.length, 2);
+  assert.notDeepEqual(requests[0].slice(1), requests[1].slice(1));
+  const fullHistory = session.getWorkingMemory(0);
+  assert.equal(fullHistory.length, 15);
+  assert.deepEqual(fullHistory.slice(0, 10), oldMessages);
+  assert.ok(fullHistory.every((message) => message.role !== "system"));
+});
+
+test("a reused session remembers previous runs while another session uses its own workspace and history", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tiny-claw-engine-sessions-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const workDirA = join(directory, "a");
+  const workDirB = join(directory, "b");
+  await mkdir(workDirA);
+  await mkdir(workDirB);
+  await writeFile(join(workDirA, "AGENTS.md"), "Workspace A rules");
+  await writeFile(join(workDirB, "AGENTS.md"), "Workspace B rules");
+  const first = createSession("Remember alpha", workDirA);
+  const second = createSession("Hello beta", workDirB);
+  const requests = [];
+  const engine = new AgentEngine({
+    async generate(_signal, messages) {
+      requests.push(structuredClone(messages));
+      return { role: "assistant", content: "answer" };
+    },
+  }, {
+    getAvailableTools() { return []; },
+    async execute() { assert.fail("no tools expected"); },
+  });
+
+  await engine.run(new AbortController().signal, first);
+  first.append({ role: "user", content: "What did I say?" });
+  await engine.run(new AbortController().signal, first);
+  await engine.run(new AbortController().signal, second);
+
+  assert.deepEqual(requests[1].slice(1), [
+    { role: "user", content: "Remember alpha" },
+    { role: "assistant", content: "answer" },
+    { role: "user", content: "What did I say?" },
+  ]);
+  assert.match(requests[1][0].content, /Workspace A rules/u);
+  assert.match(requests[2][0].content, /Workspace B rules/u);
+  assert.doesNotMatch(requests[2][0].content, /Workspace A rules/u);
+  assert.deepEqual(requests[2].slice(1), [{ role: "user", content: "Hello beta" }]);
+  assert.equal(first.getWorkingMemory(0).length, 4);
+  assert.equal(second.getWorkingMemory(0).length, 2);
+});

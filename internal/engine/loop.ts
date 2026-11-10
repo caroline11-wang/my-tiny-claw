@@ -1,6 +1,7 @@
+import { PromptComposer } from "../context/composer.js";
+import type { Session } from "../context/session.js";
 import type { LLMProvider } from "../provider/interface.js";
 import {
-  RoleSystem,
   RoleUser,
   type Message,
 } from "../schema/message.js";
@@ -10,22 +11,14 @@ export class AgentEngine {
   constructor(
     private readonly provider: LLMProvider,
     private readonly registry: Registry,
-    readonly workDir: string,
     readonly enableThinking: boolean = false,
   ) {}
 
-  async run(signal: AbortSignal, userPrompt: string): Promise<string> {
-    console.error(`[Engine] 引擎启动，锁定工作区: ${this.workDir}`);
+  async run(signal: AbortSignal, session: Session): Promise<string> {
+    console.error(`[Engine] 唤醒会话 [${session.id}]，锁定工作区: ${session.workDir}`);
     console.error(`[Engine] 慢思考模式 (Thinking Phase): ${this.enableThinking}`);
 
-    const contextHistory: Message[] = [
-      {
-        role: RoleSystem,
-        content:
-          "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-      },
-      { role: RoleUser, content: userPrompt },
-    ];
+    const systemMsg = await new PromptComposer(session.workDir).build();
 
     let turnCount = 0;
 
@@ -34,6 +27,10 @@ export class AgentEngine {
       console.error(`========== [Turn ${turnCount}] 开始 ==========`);
 
       const availableTools = this.registry.getAvailableTools();
+      const contextHistory: Message[] = [
+        systemMsg,
+        ...session.getWorkingMemory(6),
+      ];
 
       if (this.enableThinking) {
         console.error("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...");
@@ -47,6 +44,7 @@ export class AgentEngine {
 
         if (thinkResponse.content !== "") {
           console.log(`🧠 [内部思考 Trace]: ${thinkResponse.content}`);
+          session.append(thinkResponse);
           contextHistory.push(thinkResponse);
         }
       }
@@ -64,6 +62,7 @@ export class AgentEngine {
         throw new Error("Action 阶段生成失败", { cause: error });
       }
 
+      session.append(response);
       contextHistory.push(response);
 
       if (response.content !== "") {
@@ -101,7 +100,7 @@ export class AgentEngine {
 
       console.error("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...");
       for (const observation of observationMsgs) {
-        contextHistory.push(observation);
+        session.append(observation);
       }
     }
   }
