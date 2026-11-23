@@ -1,4 +1,5 @@
 import { PromptComposer } from "../context/composer.js";
+import { Compactor } from "../context/compactor.js";
 import type { Session } from "../context/session.js";
 import type { LLMProvider } from "../provider/interface.js";
 import {
@@ -8,6 +9,8 @@ import {
 import type { Registry } from "../tools/registry.js";
 
 export class AgentEngine {
+  private readonly compactor = new Compactor(3000, 6);
+
   constructor(
     private readonly provider: LLMProvider,
     private readonly registry: Registry,
@@ -27,10 +30,11 @@ export class AgentEngine {
       console.error(`========== [Turn ${turnCount}] 开始 ==========`);
 
       const availableTools = this.registry.getAvailableTools();
-      const contextHistory: Message[] = [
+      const history: Message[] = [
         systemMsg,
-        ...session.getWorkingMemory(6),
+        ...session.getWorkingMemory(20),
       ];
+      let contextHistory = this.compactor.compact(history);
 
       if (this.enableThinking) {
         console.error("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...");
@@ -45,7 +49,8 @@ export class AgentEngine {
         if (thinkResponse.content !== "") {
           console.log(`🧠 [内部思考 Trace]: ${thinkResponse.content}`);
           session.append(thinkResponse);
-          contextHistory.push(thinkResponse);
+          history.push(thinkResponse);
+          contextHistory = this.compactor.compact(history);
         }
       }
 

@@ -4,6 +4,7 @@
 并实现第 02 至 07 讲中的 Schema、Provider、Main Loop、工具注册分发及
 read_file、write_file、bash、edit_file 工具。
 第 08 讲支持单轮工具并发，第 10 讲增加 Skill 加载与动态系统提示词组装；
+第 11 讲增加 Session，第 12 讲加入上下文压缩；
 HTTP 入口用于 AgentRun 部署，与 CLI 共享同一套引擎。
 它是课程 Go 示例的 TypeScript 对照实现；第 04 讲中的智谱模型已替换为阿里云百炼。
 
@@ -23,7 +24,8 @@ my-tiny-claw/
 │   ├── context/
 │   │   ├── skill.ts         # SKILL.md 解析、递归扫描与技能格式化
 │   │   ├── composer.ts      # 核心规则 + AGENTS.md + Skills
-│   │   └── session.ts       # Session 历史、Working Memory 与进程内管理器
+│   │   ├── session.ts       # Session 历史、Working Memory 与进程内管理器
+│   │   └── compactor.ts     # 上下文阶梯压缩
 │   ├── tools/               # 工具注册、执行与中间件
 │   ├── memory/              # 文件系统记忆与待办
 │   └── feishu/              # 飞书交互集成
@@ -348,11 +350,11 @@ CLI 的工作区是启动目录下的 `workspace/`；HTTP/AgentRun 的工作区�
 
 1. 调用方先把用户消息写入 Session，再调用引擎；引擎不重复追加用户输入。
 2. 每次 `run()` 根据 `session.workDir` 组装最新的 System Prompt；系统消息不存入会话历史。
-3. 每个工具轮次重新读取 `session.getWorkingMemory(6)`，形成 System Prompt + 最近消息。
+3. 每个工具轮次重新读取 `session.getWorkingMemory(20)`，形成 System Prompt + 最近消息。
    非空 Thinking 回复会同时追加到 Session 和当前 Action 上下文；Action 回复始终保存到 Session。
-   当前轮次的 Thinking 可以使 Action 实际看到超过 6 条非系统消息。
+   当前轮次的 Thinking 可以使 Action 实际看到超过 20 条非系统消息。
 4. 并发工具全部完成后，按原始调用顺序把观察结果写入 Session，再开始下一轮。
-   完整历史保留在内存中，6 条窗口只限制发给模型的历史，不裁掉 Session 的存档。
+   完整历史保留在内存中，20 条窗口只限制发给模型的历史，不裁掉 Session 的存档。
 5. 复用同一个 Session 可以保留前次调用的历史；不同 Session 不共用历史。
    同一个 Session 的 `run()` 应顺序调用，本实现没有加入请求级排队或跨进程锁。
 
@@ -448,6 +450,23 @@ Mock 模式仍只读取 `workspace/a.txt`、`b.txt`、`c.txt`，缺失文件会�
 不会创建 `ping.ts` 或 Git 提交。真实规范遵循效果需要用真实模型实跑确认。
 HTTP/AgentRun 入口不随 CLI 改变默认工作区；如需复用配置，可把 `AGENT_WORK_DIR`
 指向对应 `workspace/`，或将配置放入 HTTP 的工作区根目录。
+
+## 第 12 讲：Context Compaction
+
+`internal/context/compactor.ts` 参考第 12 讲的 Go 示例：每轮取最近 20 条历史，
+按消息内容及工具名称、JSON 参数的 UTF-8 字节估算长度；达到 3000 字节时触发压缩，
+保护最近 6 条消息。远期超过 200 字节的工具结果被掩码，远期超过 200 字节的
+assistant 内容被折叠；近期超过 1000 字节的工具结果保留前后各不超过 500 字节，
+在 Unicode 字符边界截断。系统提示词、工具调用及其 ID 保持不变。
+
+压缩只作用于发给 Provider 的临时消息，不修改 Session 原始历史。Thinking 请求前
+压缩一次；若 Thinking 产生新消息，Action 请求前基于原始上下文重新压缩，避免
+新增内容跨过阈值时漏检。该策略不是 Token 精确计数或硬上限：用户消息、系统提示、
+近期 assistant 内容和工具参数可能仍导致请求超限；它也不限制 Session 的内存增长。
+
+```sh
+node --import tsx --test tests/compactor.test.mjs tests/engine.test.mjs
+```
 
 ## 验证与编译
 

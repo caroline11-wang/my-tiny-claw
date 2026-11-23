@@ -369,9 +369,9 @@ test("prompt loading failures stop before any provider or tool operation", async
   });
 });
 
-test("each tool turn rebuilds a six-message window without deleting the full session history", async () => {
+test("each tool turn rebuilds a twenty-message window without deleting the full session history", async () => {
   const session = new Session("window", "/workspace");
-  const oldMessages = Array.from({ length: 10 }, (_, index) => ({
+  const oldMessages = Array.from({ length: 24 }, (_, index) => ({
     role: index % 2 === 0 ? "user" : "assistant",
     content: `old-${index}`,
   }));
@@ -384,8 +384,8 @@ test("each tool turn rebuilds a six-message window without deleting the full ses
   const engine = new AgentEngine({
     async generate(_signal, messages) {
       requests.push(structuredClone(messages));
-      assert.equal(messages.length, 7, "system plus six recent messages");
-      assert.deepEqual(messages.slice(1), session.getWorkingMemory(6));
+      assert.equal(messages.length, 21, "system plus twenty recent messages");
+      assert.deepEqual(messages.slice(1), session.getWorkingMemory(20));
       return requests.length === 1
         ? { role: "assistant", content: "", toolCalls: calls }
         : { role: "assistant", content: "done" };
@@ -401,9 +401,60 @@ test("each tool turn rebuilds a six-message window without deleting the full ses
   assert.equal(requests.length, 2);
   assert.notDeepEqual(requests[0].slice(1), requests[1].slice(1));
   const fullHistory = session.getWorkingMemory(0);
-  assert.equal(fullHistory.length, 15);
-  assert.deepEqual(fullHistory.slice(0, 10), oldMessages);
+  assert.equal(fullHistory.length, 29);
+  assert.deepEqual(fullHistory.slice(0, 24), oldMessages);
   assert.ok(fullHistory.every((message) => message.role !== "system"));
+});
+
+test("compacts each model request without changing session observations", async () => {
+  const observation = "start" + "😀".repeat(1100) + "end";
+  const call = { id: "call", name: "example", arguments: {} };
+  const requests = [];
+  const engine = new AgentEngine({
+    async generate(_signal, messages, tools) {
+      requests.push(structuredClone(messages));
+      if (requests.length === 1) return { role: "assistant", content: "plan" };
+      if (requests.length === 2) return { role: "assistant", content: "", toolCalls: [call] };
+      if (tools.length === 0) return { role: "assistant", content: "next plan" };
+      return { role: "assistant", content: "done" };
+    },
+  }, {
+    getAvailableTools() { return [{ name: "example", description: "example", inputSchema: {} }]; },
+    async execute() { return { toolCallId: call.id, output: observation, isError: false }; },
+  }, true);
+  const session = createSession("task");
+  assert.equal(await engine.run(new AbortController().signal, session), "done");
+  for (const request of requests.slice(2)) {
+    const result = request.find((message) => message.toolCallId === call.id);
+    assert.match(result.content, /内容过长/u);
+    assert.ok(result.content.startsWith("start"));
+    assert.ok(result.content.endsWith("end"));
+    assert.deepEqual(request.find((message) => message.toolCalls)?.toolCalls, [call]);
+  }
+  assert.equal(session.getWorkingMemory(0).find((message) => message.toolCallId === call.id).content, observation);
+});
+
+test("rechecks the original context after thinking pushes it over the threshold", async () => {
+  const session = createSession("task");
+  const call = { id: "old", name: "read_file", arguments: {} };
+  const oldOutput = "old".repeat(100);
+  session.append({ role: "assistant", content: "", toolCalls: [call] });
+  session.append({ role: "user", content: oldOutput, toolCallId: call.id });
+  for (let i = 0; i < 5; i++) session.append({ role: "user", content: `recent ${i}` });
+  const requests = [];
+  const engine = new AgentEngine({
+    async generate(_signal, messages) {
+      requests.push(structuredClone(messages));
+      return { role: "assistant", content: requests.length === 1 ? "plan".repeat(800) : "done" };
+    },
+  }, {
+    getAvailableTools() { return []; },
+    async execute() { assert.fail("no tools expected"); },
+  }, true);
+  await engine.run(new AbortController().signal, session);
+  assert.equal(requests[0].find((message) => message.toolCallId === call.id).content, oldOutput);
+  assert.match(requests[1].find((message) => message.toolCallId === call.id).content, /强制清理/u);
+  assert.equal(session.getWorkingMemory(0).find((message) => message.toolCallId === call.id).content, oldOutput);
 });
 
 test("a reused session remembers previous runs while another session uses its own workspace and history", async (t) => {
