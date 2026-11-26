@@ -112,8 +112,10 @@ function createEngine(sessionId: string): { engine: AgentEngine; session: Sessio
   registry.register(new EditFileTool(workDir));
 
   const enableThinking = process.env.ENABLE_THINKING === "true";
+  // Plan Mode：状态外部化（PLAN.md/TODO.md 写入工作区），跨会话/跨进程恢复进度
+  const planMode = process.env.PLAN_MODE === "true";
   return {
-    engine: new AgentEngine(provider, registry, enableThinking),
+    engine: new AgentEngine(provider, registry, enableThinking, planMode),
     session: GlobalSessionMgr.getOrCreate(sessionId, workDir),
   };
 }

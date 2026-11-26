@@ -15,13 +15,14 @@ export class AgentEngine {
     private readonly provider: LLMProvider,
     private readonly registry: Registry,
     readonly enableThinking: boolean = false,
+    readonly planMode: boolean = false,
   ) {}
 
   async run(signal: AbortSignal, session: Session): Promise<string> {
-    console.error(`[Engine] 唤醒会话 [${session.id}]，锁定工作区: ${session.workDir}`);
+    console.error(`[Engine] 唤醒会话 [${session.id}]，锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`);
     console.error(`[Engine] 慢思考模式 (Thinking Phase): ${this.enableThinking}`);
 
-    const systemMsg = await new PromptComposer(session.workDir).build();
+    const systemMsg = await new PromptComposer(session.workDir, this.planMode).build();
 
     let turnCount = 0;
 

@@ -175,7 +175,9 @@ async function main(): Promise<void> {
     registry.register(new WriteFileTool(workDir));
     registry.register(new BashTool(workDir));
     registry.register(new EditFileTool(workDir));
-    const engine = new AgentEngine(provider, registry, true);
+    // Plan Mode：状态外部化（PLAN.md/TODO.md），由 .env 的 PLAN_MODE=true 开启
+    const planMode = process.env.PLAN_MODE === "true";
+    const engine = new AgentEngine(provider, registry, true, planMode);
     const session = GlobalSessionMgr.getOrCreate("terminal", workDir);
     session.append({
       role: "user",

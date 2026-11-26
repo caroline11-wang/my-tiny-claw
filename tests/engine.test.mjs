@@ -369,6 +369,30 @@ test("prompt loading failures stop before any provider or tool operation", async
   });
 });
 
+test("Plan Mode reaches model requests independently of Thinking", async () => {
+  for (const [thinking, planMode, requestCount] of [[true, undefined, 2], [false, true, 1], [true, true, 2]]) {
+    const systemMessages = [];
+    const tools = [{ name: "write_file", description: "Write a file", inputSchema: {} }];
+    const engine = new AgentEngine({
+      async generate(_signal, messages, availableTools) {
+        systemMessages.push(messages[0]);
+        return { role: "assistant", content: availableTools.length === 0 ? "planning" : "done" };
+      },
+    }, {
+      getAvailableTools() { return tools; },
+      async execute() { assert.fail("no tools expected"); },
+    }, thinking, planMode);
+
+    assert.equal(engine.planMode, planMode ?? false);
+    assert.equal(await engine.run(new AbortController().signal, createSession("task")), "done");
+    assert.equal(systemMessages.length, requestCount);
+    for (const message of systemMessages) {
+      assert.equal(message.role, "system");
+      assert.equal(message.content.includes("Plan Mode: ON"), planMode ?? false);
+    }
+  }
+});
+
 test("each tool turn rebuilds a twenty-message window without deleting the full session history", async () => {
   const session = new Session("window", "/workspace");
   const oldMessages = Array.from({ length: 24 }, (_, index) => ({

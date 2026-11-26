@@ -4,7 +4,7 @@
 并实现第 02 至 07 讲中的 Schema、Provider、Main Loop、工具注册分发及
 read_file、write_file、bash、edit_file 工具。
 第 08 讲支持单轮工具并发，第 10 讲增加 Skill 加载与动态系统提示词组装；
-第 11 讲增加 Session，第 12 讲加入上下文压缩；
+第 11 讲增加 Session，第 12 讲加入上下文压缩，第 13 讲加入 Plan Mode；
 HTTP 入口用于 AgentRun 部署，与 CLI 共享同一套引擎。
 它是课程 Go 示例的 TypeScript 对照实现；第 04 讲中的智谱模型已替换为阿里云百炼。
 
@@ -467,6 +467,18 @@ assistant 内容被折叠；近期超过 1000 字节的工具结果保留前后�
 ```sh
 node --import tsx --test tests/compactor.test.mjs tests/engine.test.mjs
 ```
+
+## 第 13 讲：Plan Mode 与文件系统记忆
+
+通过 `new AgentEngine(provider, registry, false, true)` 开启 Plan Mode。
+第四个参数 `planMode` 默认关闭，与第三个参数 `enableThinking` 相互独立；
+现有 CLI 和 HTTP 入口默认行为不变。
+
+开启后，`PromptComposer` 在核心规则之后、`AGENTS.md` 和 Skills 之前注入计划规则。
+规则要求模型先检查工作区根目录下的 `PLAN.md` 和 `TODO.md`，按需创建或读取，
+从首个未完成项继续，完成一项立即勾选，遇错重新读取待办。复用同一工作区可通过这些文件恢复任务进度，
+但不会恢复进程内 Session 历史。文件由模型使用现有工具维护，并非由引擎自动创建或强制执行；
+此模式也不是只读模式。
 
 ## 验证与编译
 

@@ -168,3 +168,22 @@ test("composer propagates non-missing AGENTS.md read errors", async (t) => {
     return true;
   });
 });
+
+test("composer inserts Plan Mode between the core and workspace instructions only when enabled", async (t) => {
+  const directory = await workspace(t);
+  await writeFile(join(directory, "AGENTS.md"), "Workspace guidelines");
+  await writeSkill(directory, "review/SKILL.md", "review");
+  const normal = await new PromptComposer(directory).build();
+  const planned = await new PromptComposer(directory, true).build();
+
+  assert.doesNotMatch(normal.content, /Plan Mode: ON|PLAN\.md|TODO\.md/u);
+  assert.equal(planned.role, "system");
+  const start = planned.content.indexOf("\n# 长程任务");
+  const end = planned.content.indexOf("\n# 项目专属指南");
+  assert.ok(start > 0 && end > start);
+  assert.equal(planned.content.slice(0, start) + planned.content.slice(end), normal.content);
+  assert.match(planned.content, /bash.*PLAN\.md.*TODO\.md/u);
+  assert.match(planned.content, /write_file.*PLAN\.md.*TODO\.md/u);
+  assert.match(planned.content, /read_file.*PLAN\.md.*TODO\.md.*- \[ \]/u);
+  assert.match(planned.content, /edit_file.*TODO\.md.*- \[x\]/u);
+});
