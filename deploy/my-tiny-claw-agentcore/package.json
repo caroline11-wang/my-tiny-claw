@@ -1,0 +1,17 @@
+{
+  "name": "my-tiny-claw-agentcore",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript Agent Harness deployed as AgentCore high-code agent (root main.js entry)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
+    "openai": "^7.34.0"
+  }
+}

@@ -138,18 +138,22 @@ function jsonResponse(res: http.ServerResponse, status: number, payload: unknown
 const PORT = Number(process.env.AGENT_PORT || process.env.PORT || 9000);
 
 const server = http.createServer(async (req, res) => {
-  // 记录所有进入的请求（排错用：定位平台实际调用的方法与路径）
+  // 记录所有进入的请求（排错用：定位平台实际调用的方法与路径，含 query）
+  // Node 的 req.url 包含 query string（AgentCore 调试面板会带 ?sessionId=...），
+  // 路由匹配必须先剥离 query，只用 pathname。
+  const [pathname = "", query = ""] = (req.url ?? "").split("?");
   console.log(`[Server] <-- ${req.method} ${req.url}`);
 
   // 健康检查：对应控制台"健康检查"配置路径
-  if (req.method === "GET" && (req.url === "/health" || req.url === "/healthz")) {
+  if (req.method === "GET" && (pathname === "/health" || pathname === "/healthz")) {
     return jsonResponse(res, 200, { status: "ok" });
   }
 
   // Agent 调试接口：AgentRun"代码与调试 → 调试"面板实测 POST 到根路径 "/"；
+  // AgentCore 调试面板 POST /v1/chat/completions?sessionId=...；
   // 同时兼容 OpenAI 风格路径变体（带/不带 /v1 前缀、尾部斜杠），供 curl/SDK 直接调用。
   const isChatPath =
-    req.url === "/" || /^\/(v1\/)?chat\/completions\/?$/.test(req.url ?? "");
+    pathname === "/" || /^\/(v1\/)?chat\/completions\/?$/.test(pathname);
   if (req.method === "POST" && isChatPath) {
     try {
       const rawBody = await readBody(req);
@@ -163,11 +167,20 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, 400, { error: { message: "缺少 user 消息" } });
       }
 
-      // 会话 ID：优先用平台传入的 X-AgentRun-Session-ID（调试面板的「会话 ID」即此值，
-      // 且平台按该值做会话亲和路由到同一实例）；header 缺失时兜底生成一次性会话。
-      const headerSessionId = req.headers["x-agentrun-session-id"]?.toString().trim();
-      const sessionId = headerSessionId || randomUUID();
-      console.log(`[Server] session=${sessionId} (${headerSessionId ? "来自平台 header" : "header 缺失，临时生成"})`);
+      // 会话 ID 三级来源：AgentCore 调试面板走 query(?sessionId=...)；
+      // AgentRun 调试面板走 header(X-AgentRun-Session-ID)，平台并按它做会话亲和路由；
+      // 两者都缺失时生成一次性临时会话。
+      const params = new URLSearchParams(query);
+      const sessionId =
+        params.get("sessionId")?.trim() ||
+        req.headers["x-agentrun-session-id"]?.toString().trim() ||
+        randomUUID();
+      const sessionSource = params.get("sessionId")?.trim()
+        ? "来自 query sessionId (AgentCore)"
+        : req.headers["x-agentrun-session-id"]?.toString().trim()
+          ? "来自 header (AgentRun)"
+          : "两者缺失，临时生成";
+      console.log(`[Server] session=${sessionId} (${sessionSource})`);
 
       const { engine, session } = createEngine(sessionId);
       session.append({ role: "user", content: userPrompt });
